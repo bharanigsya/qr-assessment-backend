@@ -281,15 +281,44 @@ const QUESTION_DATA = [{"id":"salesforce","name":"Salesforce","sets":{"A":[{"tit
    (a small database + API) if you need one shared admin dashboard that
    every device can see. */
 (function(){
-  const NS = 'qrportal:';
-  function k(key, shared){ return NS + (shared ? 'shared:' : 'local:') + key; }
+  const API_BASE = 'https://backend-production-0bc47.up.railway.app';
+
   window.storage = {
     async set(key, value, shared){
       try{
-        localStorage.setItem(k(key, shared), value);
-        return { key, value, shared: !!shared };
+        const res = await fetch(`${API_BASE}/api/storage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, value, shared: !!shared })
+        });
+        if(!res.ok) return null;
+        return await res.json();
       }catch(e){ return null; }
     },
+    async get(key, shared){
+      try{
+        const res = await fetch(`${API_BASE}/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`);
+        if(!res.ok) return null;
+        const data = await res.json();
+        return data; // already { key, value, shared } or null
+      }catch(e){ return null; }
+    },
+    async delete(key, shared){
+      try{
+        const res = await fetch(`${API_BASE}/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`, { method: 'DELETE' });
+        if(!res.ok) return null;
+        return await res.json();
+      }catch(e){ return null; }
+    },
+    async list(prefix, shared){
+      try{
+        const res = await fetch(`${API_BASE}/api/storage-list?prefix=${encodeURIComponent(prefix||'')}&shared=${!!shared}`);
+        if(!res.ok) return null;
+        return await res.json();
+      }catch(e){ return null; }
+    }
+  }
+})();
     async get(key, shared){
       try{
         const v = localStorage.getItem(k(key, shared));

@@ -273,13 +273,8 @@ const QUESTION_DATA = [{"id":"salesforce","name":"Salesforce","sets":{"A":[{"tit
 </script>
 <script>
 /* ============ LOCAL STORAGE SHIM ============ */
-/* Standalone replacement for the Claude-artifact-only window.storage API.
-   Persists everything to the browser's localStorage instead, so this file
-   runs as a normal, self-contained website — just open it or host it
-   anywhere. Note: data lives in each visitor's own browser only; it is
-   NOT shared across devices/computers. Wire this up to a real backend
-   (a small database + API) if you need one shared admin dashboard that
-   every device can see. */
+/* Talks to the Railway backend so results are shared across every
+   device/browser, instead of being trapped in one browser's local storage. */
 (function(){
   const API_BASE = 'https://backend-production-0bc47.up.railway.app';
 
@@ -299,8 +294,7 @@ const QUESTION_DATA = [{"id":"salesforce","name":"Salesforce","sets":{"A":[{"tit
       try{
         const res = await fetch(`${API_BASE}/api/storage/${encodeURIComponent(key)}?shared=${!!shared}`);
         if(!res.ok) return null;
-        const data = await res.json();
-        return data; // already { key, value, shared } or null
+        return await res.json();
       }catch(e){ return null; }
     },
     async delete(key, shared){
@@ -316,34 +310,6 @@ const QUESTION_DATA = [{"id":"salesforce","name":"Salesforce","sets":{"A":[{"tit
         if(!res.ok) return null;
         return await res.json();
       }catch(e){ return null; }
-    }
-  }
-})();
-    async get(key, shared){
-      try{
-        const v = localStorage.getItem(k(key, shared));
-        if(v === null) return null;
-        return { key, value: v, shared: !!shared };
-      }catch(e){ return null; }
-    },
-    async delete(key, shared){
-      try{
-        localStorage.removeItem(k(key, shared));
-        return { key, deleted: true, shared: !!shared };
-      }catch(e){ return null; }
-    },
-    async list(prefix, shared){
-      try{
-        const pfx = k(prefix || '', shared);
-        const keys = [];
-        for(let i=0;i<localStorage.length;i++){
-          const full = localStorage.key(i);
-          if(full && full.indexOf(pfx) === 0){
-            keys.push(full.slice(NS.length + (shared ? 7 : 6)));
-          }
-        }
-        return { keys, prefix: prefix || '', shared: !!shared };
-      }catch(e){ return { keys: [] }; }
     }
   };
 })();

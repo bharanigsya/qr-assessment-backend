@@ -488,6 +488,17 @@ function renderInstructions(){
 function escapeHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
 /* ============ TEST VIEW ============ */
+/* ============ TEST VIEW ============ */
+function shuffleArray(arr){
+  const a = arr.slice();
+  for(let i=a.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
+function beginTest(){
 function beginTest(){
   state.startTime = Date.now();
   state.remainingSec = state.timeLimitSec;
@@ -495,6 +506,12 @@ function beginTest(){
   state.violations = { fullscreen:0, tabswitch:0, blur:0 };
   state.flagged = false;
   state.setId = Math.random() < 0.5 ? 'A' : 'B';
+   state.shuffleMap = {};
+  state.role.sets[state.setId].forEach(sec=>{
+    sec.questions.forEach(q=>{
+      state.shuffleMap[q.id] = shuffleArray([0,1,2,3]);
+    });
+  });
   state.view = 'test';
   render();
   requestFS();
@@ -635,15 +652,18 @@ function renderTest(){
       </div>`);
       const optsWrap = qc.querySelector('.opts');
       const letters=['a','b','c','d'];
-      q.options.forEach((opt,oi)=>{
-        const letter = letters[oi];
+      const order = state.shuffleMap[q.id];
+      order.forEach((origIdx, displayIdx)=>{
+        const letter = letters[displayIdx];
+        const opt = q.options[origIdx];
+        const origLetter = letters[origIdx];
         const optEl = el(`<label class="opt" data-letter="${letter}">
           <input type="radio" name="${q.id}" value="${letter}">
           <span class="oletter">${letter.toUpperCase()})</span>
           <span>${escapeHtml(opt)}</span>
         </label>`);
         optEl.querySelector('input').addEventListener('change', ()=>{
-          state.answers[q.id] = letter;
+          state.answers[q.id] = origLetter;
           optsWrap.querySelectorAll('.opt').forEach(o=>o.classList.remove('checked'));
           optEl.classList.add('checked');
           updateProgress();

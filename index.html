@@ -220,6 +220,7 @@
   }
   .admin-table td{padding:10px 12px;border-bottom:1px solid var(--line);}
   .admin-table tr:hover{background:var(--paper-2);}
+  .pill.bad{max-width:280px;white-space:normal;line-height:1.35;text-align:left;}
   .pill{padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:600;display:inline-block;}
   .pill.good{background:var(--good-bg);color:var(--good);}
   .pill.bad{background:var(--bad-bg);color:var(--bad);}
@@ -325,6 +326,7 @@ let state = {
   timerInterval: null,
   remainingSec: 20*60,
   violations: { fullscreen:0, tabswitch:0, blur:0 },
+  violationLog: [],   // detailed reasons with timestamps
   flagged: false,
   submitting: false,
 };
@@ -557,6 +559,7 @@ function onFsChange(){
   const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
   if(!inFs){
     state.violations.fullscreen++;
+    logViolation('fullscreen', 'Exited full-screen mode');
     flagIfNeeded();
     $('#fsOverlayText').textContent = `Full-screen exited. This is violation #${totalViolations()} for this test. Click Resume Test to continue — repeated exits will auto-submit your test.`;
     $('#fsOverlay').classList.add('show');
@@ -566,6 +569,7 @@ function onVisChange(){
   if(state.view!=='test') return;
   if(document.hidden){
     state.violations.tabswitch++;
+    logViolation('tabswitch', 'Switched tab / window (page hidden)');
     flagIfNeeded();
   }
 }
@@ -578,11 +582,15 @@ function onBlur(){
     if(state.view!=='test') return;
     if(document.hasFocus && document.hasFocus()) return; // refocused already
     state.violations.blur++;
+    logViolation('blur', 'Window lost focus for 3+ seconds');
     flagIfNeeded();
   }, 3000);
 }
 function onFocusReturn(){
   clearTimeout(state.blurTimer);
+}
+function logViolation(type, label){
+  state.violationLog.push({ type, label, at: Date.now() });
 }
 function totalViolations(){ return state.violations.fullscreen + state.violations.tabswitch + state.violations.blur; }
 function flagIfNeeded(){
@@ -726,6 +734,7 @@ async function submitTest(reason){
     sectionScores,
     answers: state.answers,
     violations: state.violations,
+    violationLog: state.violationLog || [],
     flagged: state.flagged || reason==='violation',
     endReason: reason, // 'manual' | 'timeup' | 'violation'
     startedAt: state.startTime,
@@ -1149,10 +1158,16 @@ function renderAdminTable(){
     const unanswered = (typeof r.unanswered === 'number') ? r.unanswered : (r.total - Object.keys(r.answers||{}).length);
     const unansPill = unanswered>0 ? `<span class="pill mid">${unanswered}</span>` : `<span class="pill good">0</span>`;
     const wasTerminated = r.endReason==='violation' || r.flagged;
-    const flagCount = r.violations.fullscreen+r.violations.tabswitch+r.violations.blur;
+    const v = r.violations || {fullscreen:0,tabswitch:0,blur:0};
+    const flagCount = (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0);
+    const reasons = [];
+    if(v.fullscreen) reasons.push(`${v.fullscreen}× fullscreen exit`);
+    if(v.tabswitch) reasons.push(`${v.tabswitch}× tab switch`);
+    if(v.blur) reasons.push(`${v.blur}× focus lost`);
+    const reasonTitle = reasons.length ? reasons.join(' · ') : 'No issues';
     const flagPill = r.endReason==='violation'
-      ? `<span class="pill bad">Terminated (${flagCount})</span>`
-      : (r.flagged ? `<span class="pill bad">${flagCount} flag(s)</span>` : `<span class="pill good">clean</span>`);
+      ? `<span class="pill bad" title="${reasonTitle}">Terminated · ${reasonTitle}</span>`
+      : (r.flagged ? `<span class="pill bad" title="${reasonTitle}">${flagCount} flag(s) · ${reasonTitle}</span>` : `<span class="pill good">Clean</span>`);
     html += `<tr>
       <td><b>${escapeHtml(r.name)}</b><br><span style="color:var(--slate-soft);font-size:12px;">${escapeHtml(r.contact||'—')}</span></td>
       <td>${r.roleName}</td>
@@ -1180,12 +1195,33 @@ function viewDetail(idx){
   const roleDef = QUESTION_DATA.find(q=>q.id===r.roleId);
   const rec = getRecommendation(r.percent);
   const unanswered = (typeof r.unanswered === 'number') ? r.unanswered : (r.total - Object.keys(r.answers||{}).length);
+  const v = r.violations || {fullscreen:0,tabswitch:0,blur:0};
+  const flagCount = (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0);
+  const log = Array.isArray(r.violationLog) ? r.violationLog : [];
   let body = `<h2 class="serif" style="margin-top:0;">${escapeHtml(r.name)} — ${r.roleName}</h2>
-    <p style="font-size:13px;color:var(--slate-soft);">Score: <b>${r.score}/${r.total}</b> (${r.percent}%) · Duration: ${Math.floor(r.durationSec/60)}m ${r.durationSec%60}s · Flags: ${r.violations.fullscreen+r.violations.tabswitch+r.violations.blur}</p>
+    <p style="font-size:13px;color:var(--slate-soft);">Score: <b>${r.score}/${r.total}</b> (${r.percent}%) · Duration: ${Math.floor(r.durationSec/60)}m ${r.durationSec%60}s · Flags: ${flagCount}</p>
     <p style="margin:10px 0 0;display:flex;gap:8px;flex-wrap:wrap;">
       <span class="pill ${rec.cls}" style="font-size:13px;padding:5px 14px;">${rec.label}</span>
       ${unanswered>0 ? `<span class="pill mid" style="font-size:13px;padding:5px 14px;">${unanswered} question${unanswered>1?'s':''} left unanswered</span>` : ''}
+      ${r.flagged || r.endReason==='violation' ? `<span class="pill bad" style="font-size:13px;padding:5px 14px;">${r.endReason==='violation'?'Terminated for violations':'Flagged'}</span>` : ''}
     </p>`;
+  if(flagCount > 0 || log.length){
+    const rows = [];
+    if(v.fullscreen) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>🖥 Exited full-screen mode</span><b style="color:var(--bad);">${v.fullscreen} time${v.fullscreen>1?'s':''}</b></div>`);
+    if(v.tabswitch) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>🗂 Switched tab / window</span><b style="color:var(--bad);">${v.tabswitch} time${v.tabswitch>1?'s':''}</b></div>`);
+    if(v.blur) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>👁 Window lost focus (3+ sec)</span><b style="color:var(--bad);">${v.blur} time${v.blur>1?'s':''}</b></div>`);
+    let timeline = '';
+    if(log.length){
+      timeline = `<div style="margin-top:10px;font-size:12px;color:var(--slate-soft);"><b style="color:var(--slate);">Timeline</b><ul style="margin:6px 0 0;padding-left:18px;line-height:1.7;">` +
+        log.map(e => `<li>${new Date(e.at).toLocaleTimeString()} — ${escapeHtml(e.label||e.type)}</li>`).join('') +
+        `</ul></div>`;
+    }
+    body += `<div style="margin-top:14px;padding:14px 16px;background:var(--bad-bg);border:1px solid #e8c8c8;border-radius:4px;">
+      <b style="color:var(--bad);font-size:13.5px;">⚠ Why this candidate was flagged</b>
+      <div style="margin-top:8px;font-size:13px;color:var(--slate);">${rows.join('')}</div>
+      ${timeline}
+    </div>`;
+  }
 
   // Build a straight-up list of exactly which questions were skipped, numbered
   // across the whole test, so the admin doesn't have to scan the full sheet.

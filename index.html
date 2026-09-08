@@ -220,7 +220,7 @@
   }
   .admin-table td{padding:10px 12px;border-bottom:1px solid var(--line);}
   .admin-table tr:hover{background:var(--paper-2);}
-  .pill.bad{max-width:280px;white-space:normal;line-height:1.35;text-align:left;}
+  .pill.bad{max-width:300px;white-space:normal;line-height:1.35;text-align:left;}
   .pill{padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:600;display:inline-block;}
   .pill.good{background:var(--good-bg);color:var(--good);}
   .pill.bad{background:var(--bad-bg);color:var(--bad);}
@@ -257,7 +257,7 @@
 
 <div class="fs-overlay" id="fsOverlay">
   <h2>⚠ Return to full-screen</h2>
-  <p id="fsOverlayText">Your test is paused because you exited full-screen mode or switched windows/tabs. This has been logged. Click below to resume — repeated exits will auto-submit your test.</p>
+  <p id="fsOverlayText">Your test is paused because you left full-screen, switched tabs, or minimized the window. This has been logged. Click Resume — 3 flags will auto-submit your test.</p>
   <button class="btn btn-gold" style="margin-top:20px;" onclick="resumeFullscreen()">Resume Test</button>
 </div>
 
@@ -325,10 +325,11 @@ let state = {
   timeLimitSec: 20*60,
   timerInterval: null,
   remainingSec: 20*60,
-  violations: { fullscreen:0, tabswitch:0, blur:0 },
-  violationLog: [],   // detailed reasons with timestamps
+  violations: { fullscreen:0, tabswitch:0, blur:0, minimize:0 },
+  violationLog: [],
   flagged: false,
   submitting: false,
+  _lastViolationAt: 0,
 };
 
 const DEFAULT_ADMIN_ID = "admin";
@@ -503,8 +504,10 @@ function beginTest(){
   state.startTime = Date.now();
   state.remainingSec = state.timeLimitSec;
   state.answers = {};
-  state.violations = { fullscreen:0, tabswitch:0, blur:0 };
+  state.violations = { fullscreen:0, tabswitch:0, blur:0, minimize:0 };
+  state.violationLog = [];
   state.flagged = false;
+  state._lastViolationAt = 0;
   state.setId = Math.random() < 0.5 ? 'A' : 'B';
   state.shuffleMap = {};
   state.role.sets[state.setId].forEach(sec=>{
@@ -541,7 +544,13 @@ function attachAntiCheat(){
   document.addEventListener('visibilitychange', onVisChange);
   window.addEventListener('blur', onBlur);
   window.addEventListener('focus', onFocusReturn);
+  window.addEventListener('pagehide', onPageHide);
   window.addEventListener('contextmenu', blockCtx);
+  document.addEventListener('copy', blockClipboard);
+  document.addEventListener('cut', blockClipboard);
+  document.addEventListener('paste', blockClipboard);
+  document.addEventListener('keydown', blockKeys);
+  state._integrityTimer = setInterval(integrityCheck, 1500);
 }
 function detachAntiCheat(){
   document.removeEventListener('fullscreenchange', onFsChange);
@@ -549,63 +558,117 @@ function detachAntiCheat(){
   document.removeEventListener('visibilitychange', onVisChange);
   window.removeEventListener('blur', onBlur);
   window.removeEventListener('focus', onFocusReturn);
+  window.removeEventListener('pagehide', onPageHide);
   window.removeEventListener('contextmenu', blockCtx);
+  document.removeEventListener('copy', blockClipboard);
+  document.removeEventListener('cut', blockClipboard);
+  document.removeEventListener('paste', blockClipboard);
+  document.removeEventListener('keydown', blockKeys);
   clearTimeout(state.blurTimer);
+  if(state._integrityTimer){ clearInterval(state._integrityTimer); state._integrityTimer = null; }
   if(document.fullscreenElement) document.exitFullscreen && document.exitFullscreen().catch(()=>{});
 }
 function blockCtx(e){ if(state.view==='test'){ e.preventDefault(); } }
+function blockClipboard(e){ if(state.view==='test'){ e.preventDefault(); } }
+function blockKeys(e){
+  if(state.view!=='test') return;
+  const k = e.key || '';
+  if(e.key === 'F12' || (e.ctrlKey && e.shiftKey && /[IiJjCc]/.test(k)) || (e.ctrlKey && /[uUsSpP]/.test(k))){
+    e.preventDefault(); e.stopPropagation();
+  }
+  if(k === 'PrintScreen'){ e.preventDefault(); }
+}
+function canCountViolation(){
+  const now = Date.now();
+  if(now - (state._lastViolationAt||0) < 1200) return false;
+  state._lastViolationAt = now;
+  return true;
+}
 function onFsChange(){
   if(state.view!=='test') return;
   const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
   if(!inFs){
-    state.violations.fullscreen++;
-    logViolation('fullscreen', 'Exited full-screen mode');
-    flagIfNeeded();
-    $('#fsOverlayText').textContent = `Full-screen exited. This is violation #${totalViolations()} for this test. Click Resume Test to continue — repeated exits will auto-submit your test.`;
-    $('#fsOverlay').classList.add('show');
+    if(canCountViolation()){
+      state.violations.fullscreen++;
+      logViolation('fullscreen', 'Exited full-screen mode');
+      flagIfNeeded();
+    }
+    showFsOverlay('Full-screen exited. Violation #' + totalViolations() + '. Click Resume — auto-submit at 3 flags.');
   }
 }
 function onVisChange(){
   if(state.view!=='test') return;
   if(document.hidden){
-    state.violations.tabswitch++;
-    logViolation('tabswitch', 'Switched tab / window (page hidden)');
+    if(canCountViolation()){
+      const likelyMinimize = !document.hasFocus() || (window.outerHeight < 80 || window.outerWidth < 80);
+      if(likelyMinimize){
+        state.violations.minimize = (state.violations.minimize||0) + 1;
+        logViolation('minimize', 'Minimized the browser window');
+      } else {
+        state.violations.tabswitch++;
+        logViolation('tabswitch', 'Switched tab / window (page hidden)');
+      }
+      flagIfNeeded();
+    }
+    showFsOverlay('Window was hidden (tab switch or minimize). Violation #' + totalViolations() + '. Click Resume — auto-submit at 3 flags.');
+  }
+}
+function onPageHide(){
+  if(state.view!=='test') return;
+  if(canCountViolation()){
+    state.violations.minimize = (state.violations.minimize||0) + 1;
+    logViolation('minimize', 'Page hidden / window minimized');
     flagIfNeeded();
   }
 }
 function onBlur(){
   if(state.view!=='test') return;
-  // A brief loss of window focus (e.g. a browser/platform permission prompt) shouldn't
-  // count as cheating. Only flag it if the window stays unfocused for a few seconds.
   clearTimeout(state.blurTimer);
   state.blurTimer = setTimeout(()=>{
     if(state.view!=='test') return;
-    if(document.hasFocus && document.hasFocus()) return; // refocused already
-    state.violations.blur++;
-    logViolation('blur', 'Window lost focus for 3+ seconds');
-    flagIfNeeded();
-  }, 3000);
+    if(document.hasFocus && document.hasFocus()) return;
+    if(document.hidden) return;
+    if(canCountViolation()){
+      state.violations.blur++;
+      logViolation('blur', 'Window lost focus for 1+ second');
+      flagIfNeeded();
+    }
+    showFsOverlay('Window lost focus. Violation #' + totalViolations() + '. Click Resume — auto-submit at 3 flags.');
+  }, 1000);
 }
-function onFocusReturn(){
-  clearTimeout(state.blurTimer);
+function onFocusReturn(){ clearTimeout(state.blurTimer); }
+function integrityCheck(){
+  if(state.view!=='test') return;
+  const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if(!inFs){
+    const o = $('#fsOverlay');
+    if(o && !o.classList.contains('show')) showFsOverlay('Please stay in full-screen mode during the test.');
+  }
+}
+function showFsOverlay(msg){
+  const t = $('#fsOverlayText'); if(t) t.textContent = msg;
+  const o = $('#fsOverlay'); if(o) o.classList.add('show');
 }
 function logViolation(type, label){
   state.violationLog.push({ type, label, at: Date.now() });
 }
-function totalViolations(){ return state.violations.fullscreen + state.violations.tabswitch + state.violations.blur; }
+function totalViolations(){
+  const v = state.violations || {};
+  return (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0)+(v.minimize||0);
+}
 function flagIfNeeded(){
   const t = totalViolations();
   if(t>=1) state.flagged = true;
   updateViolationBanner();
-  if(t>=4){ submitTest('violation'); }
+  if(t>=3){ submitTest('violation'); }
 }
 function updateViolationBanner(){
-  const b = $('#violationBanner');
-  if(!b) return;
+  const b = $('#violationBanner'); if(!b) return;
   const t = totalViolations();
+  const v = state.violations || {};
   if(t>0){
     b.style.display='block';
-    b.textContent = `⚠ ${t} monitoring flag${t>1?'s':''} recorded this session (full-screen exits: ${state.violations.fullscreen}, tab switches: ${state.violations.tabswitch}, window focus lost: ${state.violations.blur}). This is visible to HR.`;
+    b.textContent = '⚠ ' + t + ' monitoring flag' + (t>1?'s':'') + ' recorded (fullscreen: ' + (v.fullscreen||0) + ', tab switch: ' + (v.tabswitch||0) + ', minimize: ' + (v.minimize||0) + ', focus lost: ' + (v.blur||0) + '). Visible to HR. Auto-submit at 3.';
   }
 }
 
@@ -1158,16 +1221,17 @@ function renderAdminTable(){
     const unanswered = (typeof r.unanswered === 'number') ? r.unanswered : (r.total - Object.keys(r.answers||{}).length);
     const unansPill = unanswered>0 ? `<span class="pill mid">${unanswered}</span>` : `<span class="pill good">0</span>`;
     const wasTerminated = r.endReason==='violation' || r.flagged;
-    const v = r.violations || {fullscreen:0,tabswitch:0,blur:0};
-    const flagCount = (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0);
+    const v = r.violations || {fullscreen:0,tabswitch:0,blur:0,minimize:0};
+    const flagCount = (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0)+(v.minimize||0);
     const reasons = [];
-    if(v.fullscreen) reasons.push(`${v.fullscreen}× fullscreen exit`);
-    if(v.tabswitch) reasons.push(`${v.tabswitch}× tab switch`);
-    if(v.blur) reasons.push(`${v.blur}× focus lost`);
+    if(v.fullscreen) reasons.push(v.fullscreen+'× fullscreen exit');
+    if(v.tabswitch) reasons.push(v.tabswitch+'× tab switch');
+    if(v.minimize) reasons.push(v.minimize+'× minimize');
+    if(v.blur) reasons.push(v.blur+'× focus lost');
     const reasonTitle = reasons.length ? reasons.join(' · ') : 'No issues';
     const flagPill = r.endReason==='violation'
       ? `<span class="pill bad" title="${reasonTitle}">Terminated · ${reasonTitle}</span>`
-      : (r.flagged ? `<span class="pill bad" title="${reasonTitle}">${flagCount} flag(s) · ${reasonTitle}</span>` : `<span class="pill good">Clean</span>`);
+      : ((r.flagged || flagCount>0) ? `<span class="pill bad" title="${reasonTitle}">${flagCount} flag(s) · ${reasonTitle}</span>` : `<span class="pill good">Clean</span>`);
     html += `<tr>
       <td><b>${escapeHtml(r.name)}</b><br><span style="color:var(--slate-soft);font-size:12px;">${escapeHtml(r.contact||'—')}</span></td>
       <td>${r.roleName}</td>
@@ -1181,7 +1245,7 @@ function renderAdminTable(){
       <td style="font-size:12px;">${new Date(r.submittedAt).toLocaleString()}</td>
       <td>
         <span class="small-link" onclick="viewDetail(${adminData.indexOf(r)})">View</span>
-        ${state.role==='admin' && wasTerminated ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--gold-2);" onclick="freeCandidate('${r._key}','${escapeHtml(r.name).replace(/'/g,"&#39;")}')">Free to retake</span>` : ''}
+        ${state.role==='admin' && (wasTerminated || flagCount>=1) ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--gold-2);" onclick="freeCandidate('${r._key}','${escapeHtml(r.name).replace(/'/g,"&#39;")}')">Free to retake</span>` : ''}
         ${state.role==='admin' ? ` &nbsp;·&nbsp; <span class="small-link" style="color:var(--bad);" onclick="deleteRecord('${r._key}')">Delete</span>` : ''}
       </td>
     </tr>`;
@@ -1195,8 +1259,8 @@ function viewDetail(idx){
   const roleDef = QUESTION_DATA.find(q=>q.id===r.roleId);
   const rec = getRecommendation(r.percent);
   const unanswered = (typeof r.unanswered === 'number') ? r.unanswered : (r.total - Object.keys(r.answers||{}).length);
-  const v = r.violations || {fullscreen:0,tabswitch:0,blur:0};
-  const flagCount = (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0);
+  const v = r.violations || {fullscreen:0,tabswitch:0,blur:0,minimize:0};
+  const flagCount = (v.fullscreen||0)+(v.tabswitch||0)+(v.blur||0)+(v.minimize||0);
   const log = Array.isArray(r.violationLog) ? r.violationLog : [];
   let body = `<h2 class="serif" style="margin-top:0;">${escapeHtml(r.name)} — ${r.roleName}</h2>
     <p style="font-size:13px;color:var(--slate-soft);">Score: <b>${r.score}/${r.total}</b> (${r.percent}%) · Duration: ${Math.floor(r.durationSec/60)}m ${r.durationSec%60}s · Flags: ${flagCount}</p>
@@ -1209,7 +1273,8 @@ function viewDetail(idx){
     const rows = [];
     if(v.fullscreen) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>🖥 Exited full-screen mode</span><b style="color:var(--bad);">${v.fullscreen} time${v.fullscreen>1?'s':''}</b></div>`);
     if(v.tabswitch) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>🗂 Switched tab / window</span><b style="color:var(--bad);">${v.tabswitch} time${v.tabswitch>1?'s':''}</b></div>`);
-    if(v.blur) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>👁 Window lost focus (3+ sec)</span><b style="color:var(--bad);">${v.blur} time${v.blur>1?'s':''}</b></div>`);
+    if(v.minimize) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>⬇ Minimized the browser</span><b style="color:var(--bad);">${v.minimize} time${v.minimize>1?'s':''}</b></div>`);
+    if(v.blur) rows.push(`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f0e6e6;"><span>👁 Window lost focus</span><b style="color:var(--bad);">${v.blur} time${v.blur>1?'s':''}</b></div>`);
     let timeline = '';
     if(log.length){
       timeline = `<div style="margin-top:10px;font-size:12px;color:var(--slate-soft);"><b style="color:var(--slate);">Timeline</b><ul style="margin:6px 0 0;padding-left:18px;line-height:1.7;">` +

@@ -273,10 +273,10 @@ const QUESTION_DATA = [{"id":"salesforce","name":"Salesforce","sets":{"A":[{"tit
 </script>
 <script>
 /* ============ LOCAL STORAGE SHIM ============ */
-/* Talks to the Railway backend so results are shared across every
+/* Talks to the backend so results are shared across every
    device/browser, instead of being trapped in one browser's local storage. */
 (function(){
-  const API_BASE = 'https://backend-production-0bc47.up.railway.app';
+  const API_BASE = '';
 
   window.storage = {
     async set(key, value, shared){

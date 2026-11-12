@@ -44,9 +44,11 @@ if (process.env.RENDER_EXTERNAL_URL) ALLOWED_ORIGINS.push(process.env.RENDER_EXT
 // ---------------------------------------------------------------------------
 // /health is public and harmless, so the standalone loading page (hosted on another
 // origin) can call it. It is registered BEFORE the restricted CORS policy below.
+let dbReady = false;
 app.get('/health', cors({ origin: '*', methods: ['GET'] }), (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.status(200).json({ ok: true, service: 'qr-assessment-portal' });
+  // 503 until the database + credentials are initialised, so the loading page keeps waiting.
+  res.status(dbReady ? 200 : 503).json({ ok: dbReady, service: 'qr-assessment-portal' });
 });
 
 app.use(
@@ -108,12 +110,18 @@ const pool = new Pool(
   process.env.DATABASE_URL
     ? {
         connectionString: process.env.DATABASE_URL,
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
         // Verify the server certificate (Neon uses publicly trusted certs).
         // Escape hatch only if your provider uses a self-signed cert:
         //   DATABASE_SSL_INSECURE=true
         ssl: { rejectUnauthorized: process.env.DATABASE_SSL_INSECURE !== 'true' },
       }
     : {
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
         host: process.env.PGHOST || 'localhost',
         port: process.env.PGPORT || 5432,
         user: process.env.PGUSER || 'postgres',
@@ -121,6 +129,10 @@ const pool = new Pool(
         database: process.env.PGDATABASE || 'postgres',
       }
 );
+
+// Neon (and most hosts) drop idle connections. Without this listener the 'error' event is
+// unhandled and crashes the whole process.
+pool.on('error', err => console.error('[pg] idle client error:', err.message || err));
 
 async function kvGet(key, shared = true) {
   const { rows } = await pool.query('SELECT value FROM kv_store WHERE store_key = $1 AND shared = $2', [key, shared]);
@@ -252,7 +264,18 @@ async function initDb() {
   await initCredentials();
   console.log('Database ready.');
 }
-initDb().catch(err => console.error('DB init failed:', err));
+(async function initDbWithRetry() {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await initDb();
+      dbReady = true;
+      return;
+    } catch (err) {
+      console.error(`DB init failed (attempt ${attempt}):`, err.message || err);
+      await new Promise(r => setTimeout(r, Math.min(30000, attempt * 2000)));
+    }
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // Session tokens (stateless, HMAC-signed)
@@ -302,6 +325,9 @@ async function authenticate(req, res, next) {
   }
   next();
 }
+app.use('/api', (req, res, next) =>
+  dbReady ? next() : res.status(503).json({ error: 'Server is starting, please retry in a few seconds.' })
+);
 app.use('/api', authenticate);
 
 const requireStaff = (req, res, next) =>
@@ -472,6 +498,97 @@ app.post('/api/check-attempt', async (req, res) => {
 // ---------------------------------------------------------------------------
 const isCredKey = k => k === CREDS_KEY;
 
+// Answer key lives ONLY on the server (never in public/).
+const ANSWER_KEY = require('./answer-key.json');
+const FLAT_ANSWERS = {};
+for (const role of Object.values(ANSWER_KEY.roles))
+  for (const secs of Object.values(role.sets))
+    for (const sec of secs) for (const q of sec.qs) FLAT_ANSWERS[q.id] = q.a;
+
+const END_REASONS = new Set(['manual', 'timeup', 'violation']);
+const VIOLATION_TYPES = new Set(['fullscreen', 'tabswitch', 'blur', 'minimize']);
+const cleanCount = n => {
+  n = Number(n);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1000, Math.floor(n))) : 0;
+};
+
+// Rebuilds a trusted result record from what the candidate did. Nothing the client says about
+// score/percent/roleName/timing is believed; only name, contact, answers and monitoring data are used.
+function buildResultRecord(rec, roleId, startedAtFromKey) {
+  const role = ANSWER_KEY.roles[roleId];
+  if (!role) return null;
+  const setId = rec.setId === 'B' ? 'B' : 'A';
+  const sections = role.sets[setId];
+  if (!sections) return null;
+
+  const given = rec.answers && typeof rec.answers === 'object' ? rec.answers : {};
+  const answers = {};
+  let correct = 0;
+  let total = 0;
+  const sectionScores = {};
+  for (const sec of sections) {
+    let sc = 0;
+    for (const q of sec.qs) {
+      total++;
+      const g = given[q.id];
+      if (typeof g === 'string' && /^[a-d]$/.test(g)) {
+        answers[q.id] = g;
+        if (g === q.a) { correct++; sc++; }
+      }
+    }
+    sectionScores[sec.title] = { correct: sc, total: sec.qs.length };
+  }
+
+  const v = rec.violations && typeof rec.violations === 'object' ? rec.violations : {};
+  const violations = {
+    fullscreen: cleanCount(v.fullscreen),
+    tabswitch: cleanCount(v.tabswitch),
+    blur: cleanCount(v.blur),
+    minimize: cleanCount(v.minimize),
+  };
+  const violationLog = (Array.isArray(rec.violationLog) ? rec.violationLog : [])
+    .slice(0, 50)
+    .filter(e => e && typeof e === 'object')
+    .map(e => ({
+      type: VIOLATION_TYPES.has(e.type) ? e.type : 'blur',
+      label: String(e.label || '').slice(0, 120),
+      at: Number.isFinite(Number(e.at)) ? Number(e.at) : 0,
+    }));
+
+  const endReason = END_REASONS.has(rec.endReason) ? rec.endReason : 'manual';
+  const now = Date.now();
+  // The key's timestamp is client-supplied; only trust it if it is plausible.
+  const startedAt = startedAtFromKey > now - 24 * 3600 * 1000 && startedAtFromKey <= now ? startedAtFromKey : now;
+  const flagCount = violations.fullscreen + violations.tabswitch + violations.blur + violations.minimize;
+
+  return {
+    name: rec.name.trim().slice(0, 200),
+    contact: String(rec.contact == null ? '' : rec.contact).slice(0, 200),
+    roleId,
+    roleName: role.name,
+    setId,
+    score: correct,
+    total,
+    unanswered: total - Object.keys(answers).length,
+    percent: total ? Math.round((correct / total) * 100) : 0,
+    sectionScores,
+    answers,
+    violations,
+    violationLog,
+    flagged: !!rec.flagged || flagCount > 0 || endReason === 'violation',
+    endReason,
+    startedAt,
+    submittedAt: now,
+    durationSec: Math.round((now - startedAt) / 1000),
+  };
+}
+
+// Staff only: lets the dashboard show which answer was correct.
+app.get('/api/answer-key', requireStaff, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ answers: FLAT_ANSWERS });
+});
+
 app.get('/api/storage/:key', requireStaff, async (req, res) => {
   try {
     if (isCredKey(req.params.key)) return res.status(403).json({ error: 'Forbidden' });
@@ -513,9 +630,12 @@ app.post('/api/storage', async (req, res) => {
       }
       if (!rec || typeof rec !== 'object' || typeof rec.name !== 'string' || !rec.name.trim() || rec.name.length > 200)
         return res.status(400).json({ error: 'Invalid result' });
-      if (rec.roleId !== rm[1]) return res.status(400).json({ error: 'Invalid result' });
-      await kvInsertOnly(key, value, true); // a submitted result can never be overwritten
-      return res.json({ key, value, shared: true });
+      const startedAtFromKey = Number(/:(\d{10,15})_/.exec(key)[1]);
+      const trusted = buildResultRecord(rec, rm[1], startedAtFromKey);
+      if (!trusted) return res.status(400).json({ error: 'Invalid result' });
+      const stored = JSON.stringify(trusted);
+      await kvInsertOnly(key, stored, true); // a submitted result can never be overwritten
+      return res.json({ key, value: stored, shared: true });
     }
     if (PROGRESS_KEY_RE.test(key) && isShared) {
       if (Buffer.byteLength(value) > MAX_PROGRESS_BYTES) return res.status(413).json({ error: 'Too large' });

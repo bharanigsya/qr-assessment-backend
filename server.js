@@ -68,8 +68,19 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '2mb' }));
 
-// Serve ONLY the public/ folder (never the project root: server.js, .env, package.json...)
+// Prefer public/ (correct layout). Never expose project root files (server.js, .env, answer-key...).
 app.use(express.static(path.join(__dirname, 'public'), { dotfiles: 'ignore' }));
+
+// Fallback: some deploys still put index.html at the repo root.
+// Only the HTML entry is served — not the rest of the project.
+const fs = require('fs');
+app.get('/', (req, res) => {
+  const fromPublic = path.join(__dirname, 'public', 'index.html');
+  const fromRoot = path.join(__dirname, 'index.html');
+  if (fs.existsSync(fromPublic)) return res.sendFile(fromPublic);
+  if (fs.existsSync(fromRoot)) return res.sendFile(fromRoot);
+  res.status(404).type('text').send('Frontend not found. Put index.html in public/ or at the project root.');
+});
 
 // ---------------------------------------------------------------------------
 // Tiny in-memory rate limiter (no extra dependency)
